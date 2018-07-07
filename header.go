@@ -79,6 +79,9 @@ const (
 	HeaderXForwardedHost                  = "X-Forwarded-Host"
 	HeaderXForwardedPort                  = "X-Forwarded-Port"
 	HeaderXForwardedProto                 = "X-Forwarded-Proto"
+	HeaderXForwardedProtocol              = "X-Forwarded-Protocol"
+	HeaderXForwardedSsl                   = "X-Forwarded-Ssl"
+	HeaderXUrlScheme                      = "X-Url-Scheme"
 	HeaderXForwardedServer                = "X-Forwarded-Server"
 	HeaderXFrameOptions                   = "X-Frame-Options"
 	HeaderXHTTPMethodOverride             = "X-HTTP-Method-Override"
@@ -167,10 +170,9 @@ func NegotiateEncoding(req *http.Request) *AcceptSpec {
 // ParseContentType method parses the request header `Content-Type` as per RFC1521.
 func ParseContentType(req *http.Request) *ContentType {
 	contentType := req.Header.Get(HeaderContentType)
-	if ess.IsStrEmpty(contentType) {
+	if contentType == "" {
 		return ContentTypeHTML
 	}
-
 	return parseMediaType(contentType)
 }
 
@@ -281,7 +283,7 @@ func NewLocale(value string) *Locale {
 //___________________________________
 
 // String is stringer interface.
-func (l *Locale) String() string {
+func (l Locale) String() string {
 	return l.Raw
 }
 

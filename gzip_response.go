@@ -11,16 +11,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
-
-	"aahframework.org/essentials.v0"
 )
-
-// GzipResponse extends `ahttp.Response` and provides gzip for response
-// bytes before writing them to the underlying response.
-type GzipResponse struct {
-	r  *Response
-	gw *gzip.Writer
-}
 
 var (
 	// GzipLevel holds value from app config.
@@ -39,30 +30,15 @@ var (
 )
 
 //‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
-// Package methods
+// GzipResponse
 //___________________________________
 
-// TODO for old method cleanup
-
-// GetGzipResponseWriter wraps `http.ResponseWriter`, returns aah framework response
-// writer that allows to advantage of response process.
-// Deprecated use `WrapGzipWriter` instead.
-func GetGzipResponseWriter(w ResponseWriter) ResponseWriter {
-	gr := grPool.Get().(*GzipResponse)
-	gr.gw = acquireGzipWriter(w)
-	gr.r = w.(*Response)
-	return gr
+// GzipResponse extends `ahttp.Response` to provides gzip compression for response
+// bytes to the underlying response.
+type GzipResponse struct {
+	r  *Response
+	gw *gzip.Writer
 }
-
-// PutGzipResponseWiriter method resets and puts the gzip writer into pool.
-// Deprecated use `ReleaseResponseWriter` instead.
-func PutGzipResponseWiriter(rw ResponseWriter) {
-	releaseGzipResponse(rw.(*GzipResponse))
-}
-
-//‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
-// Response methods
-//___________________________________
 
 // Status method returns HTTP response status code. If status is not yet written
 // it reurns 0.
@@ -82,9 +58,7 @@ func (g *GzipResponse) Header() http.Header {
 
 // Write method writes bytes into Response.
 func (g *GzipResponse) Write(b []byte) (int, error) {
-	g.r.setContentTypeIfNotSet(b)
 	g.r.WriteHeader(http.StatusOK)
-
 	size, err := g.gw.Write(b)
 	g.r.bytesWritten += size
 	return size, err
@@ -97,8 +71,9 @@ func (g *GzipResponse) BytesWritten() int {
 
 // Close method closes the writer if possible.
 func (g *GzipResponse) Close() error {
-	ess.CloseQuietly(g.gw)
-	g.gw = nil
+	if err := g.gw.Close(); err != nil {
+		return err
+	}
 	return g.r.Close()
 }
 
@@ -140,9 +115,9 @@ func (g *GzipResponse) Push(target string, opts *http.PushOptions) error {
 
 // releaseGzipResponse method resets and puts the gzip response into pool.
 func releaseGzipResponse(gw *GzipResponse) {
-	releaseGzipWriter(gw.gw)
-	releaseResponse(gw.r)
 	_ = gw.Close()
+	gwPool.Put(gw.gw)
+	releaseResponse(gw.r)
 	grPool.Put(gw)
 }
 
@@ -157,9 +132,4 @@ func acquireGzipWriter(w io.Writer) *gzip.Writer {
 	ngw := gw.(*gzip.Writer)
 	ngw.Reset(w)
 	return ngw
-}
-
-func releaseGzipWriter(gw *gzip.Writer) {
-	_ = gw.Close()
-	gwPool.Put(gw)
 }

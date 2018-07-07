@@ -7,6 +7,7 @@ package ahttp
 import (
 	"bytes"
 	"crypto/tls"
+	"errors"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -21,23 +22,23 @@ import (
 
 func TestHTTPClientIP(t *testing.T) {
 	req1 := createRawHTTPRequest(HeaderXForwardedFor, "10.0.0.1, 10.0.0.2")
-	ipAddress := clientIP(req1)
+	ipAddress := AcquireRequest(req1).ClientIP()
 	assert.Equal(t, "10.0.0.1", ipAddress)
 
 	req2 := createRawHTTPRequest(HeaderXForwardedFor, "10.0.0.2")
-	ipAddress = clientIP(req2)
+	ipAddress = AcquireRequest(req2).ClientIP()
 	assert.Equal(t, "10.0.0.2", ipAddress)
 
 	req3 := createRawHTTPRequest(HeaderXRealIP, "10.0.0.3")
-	ipAddress = clientIP(req3)
+	ipAddress = AcquireRequest(req3).ClientIP()
 	assert.Equal(t, "10.0.0.3", ipAddress)
 
 	req4 := createRequestWithHost("127.0.0.1:8080", "192.168.0.1:1234")
-	ipAddress = clientIP(req4)
+	ipAddress = AcquireRequest(req4).ClientIP()
 	assert.Equal(t, "192.168.0.1", ipAddress)
 
 	req5 := createRequestWithHost("127.0.0.1:8080", "")
-	ipAddress = clientIP(req5)
+	ipAddress = AcquireRequest(req5).ClientIP()
 	assert.Equal(t, "", ipAddress)
 }
 
@@ -62,14 +63,15 @@ func TestHTTPParseRequest(t *testing.T) {
 	req.URL, _ = url.Parse("/welcome1.html?_ref=true")
 
 	aahReq := AcquireRequest(req)
+	assert.True(t, req.URL == aahReq.URL())
 
 	assert.Equal(t, req, aahReq.Unwrap())
 	assert.Equal(t, "127.0.0.1:8080", aahReq.Host)
 	assert.Equal(t, MethodGet, aahReq.Method)
 	assert.Equal(t, "/welcome1.html", aahReq.Path)
 	assert.Equal(t, "en-gb;leve=1;q=0.8, da, en;level=2;q=0.7, en-us;q=gg", aahReq.Header.Get(HeaderAcceptLanguage))
-	assert.Equal(t, "application/json; charset=utf-8", aahReq.ContentType.String())
-	assert.Equal(t, "192.168.0.1", aahReq.ClientIP)
+	assert.Equal(t, "application/json; charset=utf-8", aahReq.ContentType().String())
+	assert.Equal(t, "192.168.0.1", aahReq.ClientIP())
 	assert.Equal(t, "http://localhost:8080/home.html", aahReq.Referer)
 
 	// Query Value
@@ -87,22 +89,24 @@ func TestHTTPParseRequest(t *testing.T) {
 	f, hdr, err := aahReq.FormFile("no_file")
 	assert.Nil(t, f)
 	assert.Nil(t, hdr)
-	assert.Nil(t, err)
+	assert.NotNil(t, err) // request Content-Type isn't multipart/form-data
 	assert.False(t, aahReq.IsJSONP())
 	assert.False(t, aahReq.IsAJAX())
-	assert.False(t, aahReq.IsWebSocket())
 
-	// Reset it
-	aahReq.Reset()
-	assert.Nil(t, aahReq.Header)
-	assert.Nil(t, aahReq.ContentType)
-	assert.Nil(t, aahReq.AcceptContentType)
-	assert.Nil(t, aahReq.Params)
-	assert.Nil(t, aahReq.Locale)
-	assert.Nil(t, aahReq.Raw)
-	assert.True(t, len(aahReq.UserAgent) == 0)
-	assert.True(t, len(aahReq.ClientIP) == 0)
+	aahReq.SetAcceptContentType(nil)
+	assert.NotNil(t, aahReq.AcceptContentType())
+	aahReq.SetLocale(nil)
+	assert.NotNil(t, aahReq.Locale())
+	aahReq.SetContentType(nil)
+	assert.NotNil(t, aahReq.ContentType())
+	aahReq.SetAcceptEncoding(nil)
+	assert.Nil(t, aahReq.AcceptEncoding())
+
+	// Release it
 	ReleaseRequest(aahReq)
+	assert.Nil(t, aahReq.Header)
+	assert.Nil(t, aahReq.raw)
+	assert.True(t, aahReq.UserAgent == "")
 }
 
 func TestHTTPRequestParams(t *testing.T) {
@@ -111,15 +115,17 @@ func TestHTTPRequestParams(t *testing.T) {
 	req1.Method = MethodPost
 	req1.URL, _ = url.Parse("http://localhost:8080/welcome1.html?_ref=true&names=Test1&names=Test%202")
 
-	params1 := AcquireRequest(req1).Params
-	params1.Path = make(map[string]string)
-	params1.Path["userId"] = "100001"
-	assert.Equal(t, "true", params1.QueryValue("_ref"))
-	assert.Equal(t, "Test1", params1.QueryArrayValue("names")[0])
-	assert.Equal(t, "Test 2", params1.QueryArrayValue("names")[1])
-	assert.True(t, len(params1.QueryArrayValue("not-exists")) == 0)
-	assert.Equal(t, "100001", params1.PathValue("userId"))
-	assert.Equal(t, "", params1.PathValue("accountId"))
+	aahReq1 := AcquireRequest(req1)
+	aahReq1.PathParams = PathParams{}
+	aahReq1.PathParams["userId"] = "100001"
+
+	assert.Equal(t, "true", aahReq1.QueryValue("_ref"))
+	assert.Equal(t, "Test1", aahReq1.QueryArrayValue("names")[0])
+	assert.Equal(t, "Test 2", aahReq1.QueryArrayValue("names")[1])
+	assert.True(t, len(aahReq1.QueryArrayValue("not-exists")) == 0)
+	assert.Equal(t, "100001", aahReq1.PathValue("userId"))
+	assert.Equal(t, "", aahReq1.PathValue("accountId"))
+	assert.Equal(t, 1, aahReq1.PathParams.Len())
 
 	// Form value
 	form := url.Values{}
@@ -132,27 +138,26 @@ func TestHTTPRequestParams(t *testing.T) {
 	_ = req2.ParseForm()
 
 	aahReq2 := AcquireRequest(req2)
-	aahReq2.Params.Form = req2.Form
-
-	params2 := aahReq2.Params
 	assert.NotNil(t, aahReq2.Body())
-	assert.Equal(t, "welcome", params2.FormValue("username"))
-	assert.Equal(t, "welcome@welcome.com", params2.FormValue("email"))
-	assert.Equal(t, "Test1", params2.FormArrayValue("names")[0])
-	assert.Equal(t, "Test 2 value", params2.FormArrayValue("names")[1])
-	assert.True(t, len(params2.FormArrayValue("not-exists")) == 0)
+	assert.Equal(t, "welcome", aahReq2.FormValue("username"))
+	assert.Equal(t, "welcome@welcome.com", aahReq2.FormValue("email"))
+	assert.Equal(t, "Test1", aahReq2.FormArrayValue("names")[0])
+	assert.Equal(t, "Test 2 value", aahReq2.FormArrayValue("names")[1])
+	assert.True(t, len(aahReq2.FormArrayValue("not-exists")) == 0)
+	assert.Equal(t, 0, aahReq2.PathParams.Len())
 	ReleaseRequest(aahReq2)
 
 	// File value
-	req3, _ := http.NewRequest("POST", "http://localhost:8080/user/registration", nil)
+	req3, _ := http.NewRequest("POST", "http://localhost:8080/user/registration", strings.NewReader(form.Encode()))
 	req3.Header.Add(HeaderContentType, ContentTypeMultipartForm.String())
 	aahReq3 := AcquireRequest(req3)
-	aahReq3.Params.File = make(map[string][]*multipart.FileHeader)
-	aahReq3.Params.File["testfile.txt"] = []*multipart.FileHeader{{Filename: "testfile.txt"}}
+	aahReq3.Unwrap().MultipartForm = new(multipart.Form)
+	aahReq3.Unwrap().MultipartForm.File = make(map[string][]*multipart.FileHeader)
+	aahReq3.Unwrap().MultipartForm.File["testfile.txt"] = []*multipart.FileHeader{{Filename: "testfile.txt"}}
 	f, fh, err := aahReq3.FormFile("testfile.txt")
 	assert.Nil(t, f)
 	assert.Equal(t, "testfile.txt", fh.Filename)
-	assert.Equal(t, "open : no such file or directory", err.Error())
+	assert.True(t, strings.HasPrefix(err.Error(), "open :"))
 	ReleaseRequest(aahReq3)
 }
 
@@ -179,20 +184,25 @@ func TestHTTPRequestCookies(t *testing.T) {
 
 func TestRequestSchemeDerived(t *testing.T) {
 	req := httptest.NewRequest("GET", "http://127.0.0.1:8080/welcome.html", nil)
-	scheme1 := identifyScheme(req)
-	assert.Equal(t, "http", scheme1)
+	assert.Equal(t, "http", Scheme(req))
+
+	req.Header.Set(HeaderXUrlScheme, "http")
+	assert.Equal(t, "http", Scheme(req))
+
+	req.Header.Set(HeaderXForwardedSsl, "on")
+	assert.Equal(t, "https", Scheme(req))
 
 	req.TLS = &tls.ConnectionState{}
-	scheme2 := identifyScheme(req)
-	assert.Equal(t, "https", scheme2)
+	assert.Equal(t, "https", Scheme(req))
+
+	req.Header.Set(HeaderXForwardedProtocol, "https")
+	assert.Equal(t, "https", Scheme(req))
 
 	req.Header.Set(HeaderXForwardedProto, "https")
-	scheme3 := identifyScheme(req)
-	assert.Equal(t, "https", scheme3)
+	assert.Equal(t, "https", Scheme(req))
 
 	req.Header.Set(HeaderXForwardedProto, "http")
-	scheme4 := identifyScheme(req)
-	assert.Equal(t, "http", scheme4)
+	assert.Equal(t, "http", Scheme(req))
 }
 
 func TestRequestSaveFile(t *testing.T) {
@@ -232,7 +242,7 @@ func TestRequestSaveFileFailsForNotFoundFile(t *testing.T) {
 
 	_, err := aahReq.SaveFile("unknown-key", path)
 	assert.NotNil(t, err)
-	assert.Equal(t, "ahttp: no such key/file: unknown-key", err.Error())
+	assert.Equal(t, errors.New("http: no such file"), err)
 }
 
 func TestRequestSaveFileCannotCreateFile(t *testing.T) {
@@ -244,55 +254,12 @@ func TestRequestSaveFileCannotCreateFile(t *testing.T) {
 	assert.True(t, strings.HasPrefix(err.Error(), "ahttp: open /root/aah.txt"))
 }
 
-func TestRequestSaveFiles(t *testing.T) {
-	aahReq, dir, teardown := setUpRequestSaveFiles(t)
-	defer teardown()
-
-	sizes, errs := aahReq.SaveFiles("framework", dir)
-	assert.Nil(t, errs)
-	assert.Nil(t, sizes)
-	_, err := os.Stat(dir + "/aah")
-	assert.Nil(t, err)
-	_, err = os.Stat(dir + "/aah2")
-	assert.Nil(t, err)
-}
-
-func TestRequestSaveFilesFailsVaildation(t *testing.T) {
-	aahReq, dir, teardown := setUpRequestSaveFiles(t)
-	defer teardown()
-
-	// Empty key
-	sizes, errs := aahReq.SaveFiles("", dir)
-	assert.NotNil(t, errs)
-	assert.Equal(t, "ahttp: form file key, '' is empty", errs[0].Error())
-	assert.Equal(t, int64(0), sizes[0])
-
-	// Empty directory
-	sizes, errs = aahReq.SaveFiles("key", "")
-	assert.NotNil(t, errs)
-	assert.Equal(t, "ahttp: destination path, '' is not a directory", errs[0].Error())
-	assert.Equal(t, int64(0), sizes[0])
-}
-
-func TestRequestSaveFilesCannotCreateFile(t *testing.T) {
-	aahReq, _, teardown := setUpRequestSaveFiles(t)
-	defer teardown()
-
-	sizes, errs := aahReq.SaveFiles("framework", "/root")
-	assert.NotNil(t, errs)
-	assert.Equal(t, int64(0), sizes[0])
-
-	errMsg := errs[0].Error()
-	assert.True(t, ("ahttp: open /root/aah: permission denied" == errMsg ||
-		"ahttp: destination path, '/root' is not a directory" == errMsg))
-}
-
 func TestRequestSaveFileForExistingFile(t *testing.T) {
 	var buf bytes.Buffer
 
 	size, err := saveFile(&buf, "testdata/file1.txt")
 	assert.NotNil(t, err)
-	assert.Equal(t, "ahttp: open testdata/file1.txt: file exists", err.Error())
+	assert.True(t, strings.HasPrefix(err.Error(), "ahttp: open testdata/file1.txt:"))
 	assert.Equal(t, int64(0), size)
 }
 
@@ -301,7 +268,8 @@ func TestRequestSaveFileForExistingFile(t *testing.T) {
 //___________________________________
 
 func createRequestWithHost(host, remote string) *http.Request {
-	return &http.Request{Host: host, RemoteAddr: remote, Header: http.Header{}}
+	url, _ := url.Parse("http://localhost:8080/testpath")
+	return &http.Request{URL: url, Host: host, RemoteAddr: remote, Header: http.Header{}}
 }
 
 func setUpRequestSaveFile(t *testing.T) (*Request, string, func()) {
@@ -315,46 +283,16 @@ func setUpRequestSaveFile(t *testing.T) (*Request, string, func()) {
 	req, _ := http.NewRequest("POST", "http://localhost:8080", buf)
 	req.Header.Add(HeaderContentType, multipartWriter.FormDataContentType())
 	aahReq := AcquireRequest(req)
-	aahReq.Params.File = make(map[string][]*multipart.FileHeader)
 
 	_, header, err := req.FormFile("framework")
 	assert.Nil(t, err)
 
-	aahReq.Params.File["framework"] = []*multipart.FileHeader{header}
+	aahReq.Unwrap().MultipartForm.File = make(map[string][]*multipart.FileHeader)
+	aahReq.Unwrap().MultipartForm.File["framework"] = []*multipart.FileHeader{header}
 
 	path := "testdata/aah.txt"
 
 	return aahReq, path, func() {
 		_ = os.Remove(path) //Teardown
-	}
-}
-
-func setUpRequestSaveFiles(t *testing.T) (*Request, string, func()) {
-	buf := new(bytes.Buffer)
-	multipartWriter := multipart.NewWriter(buf)
-	_, err := multipartWriter.CreateFormFile("framework", "aah")
-	assert.Nil(t, err)
-	_, err = multipartWriter.CreateFormFile("framework2", "aah2")
-	assert.Nil(t, err)
-
-	ess.CloseQuietly(multipartWriter)
-
-	req, _ := http.NewRequest("POST", "http://localhost:8080", buf)
-	req.Header.Add(HeaderContentType, multipartWriter.FormDataContentType())
-	aahReq := AcquireRequest(req)
-	aahReq.Params.File = make(map[string][]*multipart.FileHeader)
-
-	_, header, err := req.FormFile("framework")
-	assert.Nil(t, err)
-	_, header2, err := req.FormFile("framework2")
-	assert.Nil(t, err)
-
-	aahReq.Params.File["framework"] = []*multipart.FileHeader{header, header2}
-
-	dir := "testdata/upload"
-
-	_ = ess.MkDirAll(dir, 0755)
-	return aahReq, dir, func() {
-		_ = os.RemoveAll(dir)
 	}
 }

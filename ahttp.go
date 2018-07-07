@@ -1,5 +1,5 @@
 // Copyright (c) Jeevanandam M (https://github.com/jeevatkm)
-// go-aah/ahttp source code and usage is governed by a MIT style
+// aahframework.org/ahttp source code and usage is governed by a MIT style
 // license that can be found in the LICENSE file.
 
 // Package ahttp is to cater HTTP helper methods for aah framework.
@@ -8,7 +8,11 @@ package ahttp
 
 import (
 	"io"
+	"net"
 	"net/http"
+	"strings"
+
+	"aahframework.org/essentials.v0"
 )
 
 // HTTP Method names
@@ -22,6 +26,13 @@ const (
 	MethodDelete  = http.MethodDelete
 	MethodConnect = http.MethodConnect
 	MethodTrace   = http.MethodTrace
+)
+
+// URI Protocol scheme names
+const (
+	SchemeHTTP  = "http"
+	SchemeHTTPS = "https"
+	SchemeFTP   = "ftp"
 )
 
 // TimeFormat is the time format to use when generating times in HTTP
@@ -53,6 +64,7 @@ func AcquireRequest(r *http.Request) *Request {
 // ReleaseRequest method resets the instance value and puts back to pool.
 func ReleaseRequest(r *Request) {
 	if r != nil {
+		r.cleanupMutlipart()
 		r.Reset()
 		requestPool.Put(r)
 	}
@@ -82,4 +94,72 @@ func WrapGzipWriter(w io.Writer) ResponseWriter {
 	gr.gw = acquireGzipWriter(w)
 	gr.r = w.(*Response)
 	return gr
+}
+
+// Scheme method is to identify value of protocol value. It's is derived
+// one, Go language doesn't provide directly.
+//
+//  - `X-Forwarded-Proto` is not empty, returns as-is
+//
+//  - `X-Forwarded-Protocol` is not empty, returns as-is
+//
+//  - `http.Request.TLS` is not nil or `X-Forwarded-Ssl == on` returns `https`
+//
+//  - `X-Url-Scheme` is not empty, returns as-is
+//
+//  - returns `http`
+func Scheme(r *http.Request) string {
+	if scheme := r.Header.Get(HeaderXForwardedProto); scheme != "" {
+		return scheme
+	}
+
+	if scheme := r.Header.Get(HeaderXForwardedProtocol); scheme != "" {
+		return scheme
+	}
+
+	if r.TLS != nil || r.Header.Get(HeaderXForwardedSsl) == "on" {
+		return "https"
+	}
+
+	if scheme := r.Header.Get(HeaderXUrlScheme); scheme != "" {
+		return scheme
+	}
+
+	return "http"
+}
+
+// Host method is to correct Host value from HTTP request.
+func Host(r *http.Request) string {
+	if r.URL.Host == "" {
+		return r.Host
+	}
+	return r.URL.Host
+}
+
+// ClientIP method returns remote Client IP address aka Remote IP.
+//
+// It parses in the order of given headers otherwise it uses default
+// default header set `X-Forwarded-For`, `X-Real-IP`, "X-Appengine-Remote-Addr"
+// and finally `http.Request.RemoteAddr`.
+func ClientIP(r *http.Request, hdrs ...string) string {
+	if len(hdrs) == 0 {
+		hdrs = []string{"X-Forwarded-For", "X-Real-IP", "X-Appengine-Remote-Addr"}
+	}
+
+	for _, hdrKey := range hdrs {
+		if hv := r.Header.Get(hdrKey); !ess.IsStrEmpty(hv) {
+			index := strings.Index(hv, ",")
+			if index == -1 {
+				return strings.TrimSpace(hv)
+			}
+			return strings.TrimSpace(hv[:index])
+		}
+	}
+
+	// Remote Address
+	if remoteAddr, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return strings.TrimSpace(remoteAddr)
+	}
+
+	return ""
 }
